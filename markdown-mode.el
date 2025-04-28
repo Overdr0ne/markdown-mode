@@ -8211,22 +8211,86 @@ returns nil."
     (or url (and ref (car (markdown-reference-definition
                            (downcase (if (string= ref "") text ref))))))))
 
-(defun markdown--browse-url (url)
+(defun markdown--normalize-target (target)
+  (if-let* ((heading target)
+            (normalized (downcase heading))
+            (normalized (string-replace "-" " " normalized))
+            (normalized (replace-regexp-in-string "[[:punct:]]" ""
+                                                  normalized))
+            (normalized (string-replace " " "-" normalized))
+            (url (format "%s" normalized)))
+      url
+    (warn "Failed to normalize url")))
+
+(defun markdown-partial-heading-url-at-point ()
+  "Return the heading link at point."
+  (if (markdown-heading-at-point)
+      (concat "#" (markdown--normalize-target (match-string 5)))
+    (warn "No heading found at point")))
+
+(defun markdown-full-heading-url-at-point ()
+  "Return the full file url at point, including the internal heading if
+it exists."
+  (concat "file://" (buffer-file-name)
+          (markdown-partial-heading-url-at-point)))
+
+(defun markdown-copy-partial-heading-link-at-point-as-kill ()
+  "Copy internal heading link at point to the `kill-ring'."
+  (interactive)
+  (if-let ((url (markdown-partial-heading-url-at-point)))
+      (progn
+        (message "Copied: %s" url)
+        (kill-new url))))
+
+(defun markdown-copy-full-heading-link-at-point-as-kill ()
+  "Copy the full url to heading at point to the `kill-ring'."
+  (interactive)
+  (if-let ((url (markdown-full-heading-url-at-point)))
+      (progn
+        (message "Copied: %s" url)
+        (kill-new url))))
+
+(defun markdown-collect-targets (&optional buffer)
+  "Return all headings within BUFFER in a list as targets."
+  (with-current-buffer (current-buffer)
+    (let (targets)
+      (save-mark-and-excursion
+        (while (re-search-forward markdown-regex-header (buffer-end 1) t)
+          (setq targets
+                (append targets
+                        (list (cons (markdown--normalize-target (match-string 5))
+                                    (match-beginning 5)))))))
+      targets)))
+
+(defun markdown-jump-to-target (target)
+  "Push mark to current location and jump to TARGET."
+  (let* ((targets (markdown-collect-targets))
+         (pos (cdr (assoc target targets))))
+    (push-mark)
+    (goto-char pos)))
+
+(defun markdown-browse-url (url)
   (let* ((struct (url-generic-parse-url url))
          (full (url-fullness struct))
-         (file url))
+         (file url)
+         (target (url-target struct)))
     ;; Parse URL, determine fullness, strip query string
     (setq file (car (url-path-and-query struct)))
     ;; Open full URLs in browser, files in Emacs
     (if full
-        (browse-url url)
+        (let ((type (url-type struct)))
+          (browse-url url)
+          (when (and (equal type "file") target)
+            (markdown-jump-to-target target)))
       (when (and file (> (length file) 0))
         (let ((link-file (funcall markdown-translate-filename-function file)))
           (if (and markdown-open-image-command (string-match-p (image-file-name-regexp) link-file))
               (if (functionp markdown-open-image-command)
                   (funcall markdown-open-image-command link-file)
-                (process-file markdown-open-image-command nil nil nil link-file))
-            (find-file link-file)))))))
+                (process-file markdown-open-image-command nil nil nil link-file)))
+          (find-file link-file)))
+      (when target
+        (markdown-jump-to-target target)))))
 
 (defun markdown-follow-link-at-point (&optional event)
   "Open the non-wiki link at point or EVENT.
@@ -8237,7 +8301,7 @@ Translate filenames using `markdown-filename-translate-function'."
   (if event (posn-set-point (event-start event)))
   (if (markdown-link-p)
       (or (run-hook-with-args-until-success 'markdown-follow-link-functions (markdown-link-url))
-          (markdown--browse-url (markdown-link-url)))
+          (markdown-browse-url (markdown-link-url)))
     (user-error "Point is not at a Markdown link or URL")))
 
 (defun markdown-fontify-inline-links (last)
@@ -8713,7 +8777,7 @@ See `markdown-follow-link-at-point' and
                 (url (nth 3 values)))
            (unless url
              (user-error "Nothing to follow at point"))
-           (markdown--browse-url url)))))
+           (markdown-browse-url url)))))
 
 (defun markdown-do ()
   "Do something sensible based on context at point.
